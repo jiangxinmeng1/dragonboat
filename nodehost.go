@@ -2097,6 +2097,9 @@ func (nh *NodeHost) logNodeHostDetails() {
 func getRequestState(ctx context.Context, rs *RequestState) (sm.Result, error) {
 	select {
 	case r := <-rs.AppliedC():
+		if err := r.Error(); err != nil {
+			return sm.Result{}, err
+		}
 		if r.Completed() {
 			return r.GetResult(), nil
 		} else if r.Rejected() {
