@@ -108,6 +108,16 @@ type LogRange struct {
 // outcome of the request.
 type RequestResultCode int
 
+// SnapshotExportError reports a failed exported snapshot after the snapshot
+// worker has stopped writing it. The underlying error remains available to
+// errors.Is and errors.As callers.
+type SnapshotExportError struct {
+	Cause error
+}
+
+func (e *SnapshotExportError) Error() string { return e.Cause.Error() }
+func (e *SnapshotExportError) Unwrap() error { return e.Cause }
+
 // RequestResult is the result struct returned for the request.
 type RequestResult struct {
 	// code is the result state of the request.
@@ -120,6 +130,13 @@ type RequestResult struct {
 	logRange       LogRange
 	snapshotResult bool
 	logQueryResult bool
+	// err is set when an exported snapshot fails after being accepted.
+	err error
+}
+
+// Error returns the failure of an exported snapshot request, if any.
+func (rr *RequestResult) Error() error {
+	return rr.err
 }
 
 // RequestOutOfRange returns a boolean value indicating whether the request
@@ -692,6 +709,16 @@ func (p *pendingSnapshot) apply(key uint64,
 		p.notify(r)
 		p.pending = nil
 	}
+}
+
+func (p *pendingSnapshot) fail(key uint64, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pending == nil || p.pending.key != key {
+		return
+	}
+	p.notify(RequestResult{code: requestAborted, err: &SnapshotExportError{Cause: err}})
+	p.pending = nil
 }
 
 func newPendingConfigChange(confChangeC chan<- configChangeRequest,

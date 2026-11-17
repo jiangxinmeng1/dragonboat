@@ -910,6 +910,12 @@ func (n *node) saveDone() {
 	n.applyReady()
 }
 
+func (n *node) exportedSaveFailed(key uint64, err error) {
+	plog.Errorf("%s exported snapshot failed: %v", n.id(), err)
+	n.pendingSnapshot.fail(key, err)
+	n.saveDone()
+}
+
 func (n *node) recoverDone(index uint64) {
 	if !n.initialized() {
 		n.initialSnapshotDone(index)

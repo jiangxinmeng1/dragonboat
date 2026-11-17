@@ -297,6 +297,12 @@ func (w *ssWorker) recover(j job) error {
 
 func (w *ssWorker) save(j job) error {
 	if err := j.node.save(j.task); err != nil {
+		if j.task.SSRequest.Exported() {
+			// An export does not replace the Raft snapshot or compact its log.
+			// Report its I/O failure to the caller and release the save slot.
+			j.node.exportedSaveFailed(j.task.SSRequest.Key, err)
+			return nil
+		}
 		return err
 	}
 	j.node.saveDone()
