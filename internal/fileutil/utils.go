@@ -229,6 +229,22 @@ func CreateFlagFile(dir string,
 // protobuf message.
 func GetFlagFileContent(dir string,
 	filename string, msg pb.Unmarshaler, fs vfs.IFS) (err error) {
+	return getFlagFileContent(dir, filename, msg, fs, true)
+}
+
+// ErrCorruptedFlagFile reports invalid on-disk flag file contents.
+var ErrCorruptedFlagFile = errors.New("corrupted flag file")
+
+// GetFlagFileContentSafe reads an untrusted exported flag file without
+// panicking on malformed contents. Internal flag readers retain their
+// fail-stop behavior through GetFlagFileContent.
+func GetFlagFileContentSafe(dir string,
+	filename string, msg pb.Unmarshaler, fs vfs.IFS) error {
+	return getFlagFileContent(dir, filename, msg, fs, false)
+}
+
+func getFlagFileContent(dir string,
+	filename string, msg pb.Unmarshaler, fs vfs.IFS, panicOnCorruption bool) (err error) {
 	fp := fs.PathJoin(dir, filename)
 	f, err := fs.Open(vfs.Clean(fp))
 	if err != nil {
@@ -242,15 +258,25 @@ func GetFlagFileContent(dir string,
 		return ws(err)
 	}
 	if len(data) < 8 {
-		panic("corrupted flag file")
+		if panicOnCorruption {
+			panic("corrupted flag file")
+		}
+		return ErrCorruptedFlagFile
 	}
 	h := data[:8]
 	buf := data[8:]
 	expectedHash := getHash(buf)
 	if !bytes.Equal(h, expectedHash) {
-		panic("corrupted flag file content")
+		if panicOnCorruption {
+			panic("corrupted flag file content")
+		}
+		return ErrCorruptedFlagFile
 	}
-	pb.MustUnmarshal(msg, buf)
+	if panicOnCorruption {
+		pb.MustUnmarshal(msg, buf)
+	} else if err := msg.Unmarshal(buf); err != nil {
+		return errors.Wrap(ErrCorruptedFlagFile, err.Error())
+	}
 	return nil
 }
 
@@ -326,7 +352,6 @@ func ExtractTarBz2(bz2fn string, toDir string, fs vfs.IFS) (err error) {
 // Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-//
 var rand uint32
 var randmu sync.Mutex
 

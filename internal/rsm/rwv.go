@@ -50,6 +50,10 @@ const (
 	blockSize = settings.SnapshotChunkSize
 )
 
+// ErrInvalidSnapshotImage identifies malformed exported snapshot image data.
+// Filesystem errors are returned separately so callers can retry them.
+var ErrInvalidSnapshotImage = errors.New("invalid snapshot image")
+
 var (
 	writerMagicNumber = settings.BlockFileMagicNumber
 	tailSize          = uint64(16)
@@ -502,7 +506,10 @@ func GetV2PayloadChecksum(fp string, fs vfs.IFS) (crc []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	h := mustGetChecksum(t)
+	h, ok := getChecksum(t)
+	if !ok {
+		return nil, ErrInvalidSnapshotImage
+	}
 	f, err := fs.Open(fp)
 	if err != nil {
 		return nil, err
@@ -524,15 +531,41 @@ func GetV2PayloadChecksum(fp string, fs vfs.IFS) (crc []byte, err error) {
 }
 
 func getV2ChecksumType(fp string, fs vfs.IFS) (ct pb.ChecksumType, err error) {
-	reader, header, err := NewSnapshotReader(fp, fs)
+	f, err := fs.Open(fp)
 	if err != nil {
 		return 0, err
 	}
 	defer func() {
-		err = firstError(err, reader.Close())
+		err = firstError(err, f.Close())
 	}()
+	var lenbuf [8]byte
+	if _, err := io.ReadFull(f, lenbuf[:]); err != nil {
+		return 0, err
+	}
+	sz := binary.LittleEndian.Uint64(lenbuf[:])
+	if sz > HeaderSize-12 {
+		return 0, ErrInvalidSnapshotImage
+	}
+	data := make([]byte, sz)
+	if _, err := io.ReadFull(f, data); err != nil {
+		return 0, err
+	}
+	var header pb.SnapshotHeader
+	if err := header.Unmarshal(data); err != nil {
+		return 0, errors.Wrap(ErrInvalidSnapshotImage, err.Error())
+	}
+	var crc [4]byte
+	if _, err := io.ReadFull(f, crc[:]); err != nil {
+		return 0, err
+	}
+	if !validateHeader(data, crc[:]) {
+		return 0, ErrInvalidSnapshotImage
+	}
 	if header.Version != uint64(V2) {
-		return pb.ChecksumType(0), errors.New("not a v2 snapshot file")
+		return 0, ErrInvalidSnapshotImage
+	}
+	if _, ok := getChecksum(header.ChecksumType); !ok {
+		return 0, ErrInvalidSnapshotImage
 	}
 	return header.ChecksumType, nil
 }
@@ -547,7 +580,7 @@ func getV2CRCOffsetList(fp string, fs vfs.IFS) ([]uint64, error) {
 
 func getV2CRCOffsetListFromFileSize(sz uint64) ([]uint64, error) {
 	if sz <= tailSize+HeaderSize {
-		return nil, errors.New("invalid file size")
+		return nil, ErrInvalidSnapshotImage
 	}
 	sz = sz - tailSize - HeaderSize
 	result := make([]uint64, 0)
@@ -558,6 +591,9 @@ func getV2CRCOffsetListFromFileSize(sz uint64) ([]uint64, error) {
 			offset = offset + blockSize + checksumSize
 			sz = sz - (blockSize + checksumSize)
 		} else {
+			if sz <= checksumSize {
+				return nil, ErrInvalidSnapshotImage
+			}
 			result = append(result, offset+sz-checksumSize)
 			break
 		}
