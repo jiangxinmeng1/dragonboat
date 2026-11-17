@@ -273,6 +273,9 @@ func checkImportSettings(nhConfig config.NodeHostConfig,
 func IsCompleteSnapshotImage(ssfp string,
 	ss pb.Snapshot, fs vfs.IFS) (bool, error) {
 	checksum, err := rsm.GetV2PayloadChecksum(ssfp, fs)
+	if errors.Is(err, rsm.ErrInvalidSnapshotImage) {
+		return false, ErrIncompleteSnapshot
+	}
 	if err != nil {
 		return false, err
 	}
@@ -333,7 +336,10 @@ func getSnapshotFilenames(path string, fs vfs.IFS) ([]string, error) {
 func GetSnapshotRecord(dir string,
 	filename string, fs vfs.IFS) (pb.Snapshot, error) {
 	var ss pb.Snapshot
-	if err := fileutil.GetFlagFileContent(dir, filename, &ss, fs); err != nil {
+	if err := fileutil.GetFlagFileContentSafe(dir, filename, &ss, fs); err != nil {
+		if errors.Is(err, fileutil.ErrCorruptedFlagFile) || errors.Is(err, os.ErrNotExist) {
+			return pb.Snapshot{}, ErrIncompleteSnapshot
+		}
 		return pb.Snapshot{}, err
 	}
 	return ss, nil

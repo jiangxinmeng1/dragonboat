@@ -16,6 +16,9 @@ package tools
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -23,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/rsm"
 	"github.com/lni/dragonboat/v4/internal/server"
 	"github.com/lni/dragonboat/v4/internal/vfs"
 	pb "github.com/lni/dragonboat/v4/raftpb"
@@ -122,6 +126,76 @@ func TestSnapshotFilepath(t *testing.T) {
 	}
 	if fp != fs.PathJoin(testDataDir, fn) {
 		t.Errorf("unexpected fp %s", fp)
+	}
+}
+
+func TestGetSnapshotRecordRejectsDamagedMetadataWithoutPanic(t *testing.T) {
+	fs := vfs.GetTestFS()
+	dir := testDataDir + "_damaged_metadata"
+	if err := fs.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := fs.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
+		vfs.ReportLeakedFD(fs, t)
+	}()
+	filename := "snapshot.metadata"
+	if _, err := GetSnapshotRecord(dir, filename, fs); !errors.Is(err, ErrIncompleteSnapshot) {
+		t.Fatalf("missing metadata: got %v", err)
+	}
+	badProto := []byte{0xff}
+	hash := md5.Sum(badProto)
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"truncated", []byte{1, 2, 3}},
+		{"bad hash", append(make([]byte, 8), badProto...)},
+		{"bad protobuf", append(hash[8:], badProto...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := fs.Create(fs.PathJoin(dir, filename))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write(tc.data); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := GetSnapshotRecord(dir, filename, fs); !errors.Is(err, ErrIncompleteSnapshot) {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestIncompleteSnapshotImageReportsCorruptionWithoutPanic(t *testing.T) {
+	fs := vfs.GetTestFS()
+	path := testDataDir + "_invalid_header.gbsnap"
+	defer func() {
+		if err := fs.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		vfs.ReportLeakedFD(fs, t)
+	}()
+	data := make([]byte, rsm.HeaderSize+16+5)
+	binary.LittleEndian.PutUint64(data[:8], rsm.HeaderSize)
+	f, err := fs.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := IsCompleteSnapshotImage(path, pb.Snapshot{}, fs); ok || !errors.Is(err, ErrIncompleteSnapshot) {
+		t.Fatalf("got complete=%t, err=%v", ok, err)
 	}
 }
 

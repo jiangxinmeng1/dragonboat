@@ -17,6 +17,7 @@ package rsm
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math/rand"
 	"testing"
@@ -509,6 +510,59 @@ func TestV2PayloadChecksumCanBeRead(t *testing.T) {
 	testV2PayloadChecksumCanBeRead(t, blockSize*3-1, fs)
 	testV2PayloadChecksumCanBeRead(t, blockSize*3, fs)
 	testV2PayloadChecksumCanBeRead(t, blockSize*3+1, fs)
+}
+
+func TestV2PayloadChecksumRejectsMalformedHeaderWithoutLeaking(t *testing.T) {
+	fs := vfs.GetTestFS()
+	path := testSnapshotFilename + "_invalid_header"
+	defer func() {
+		if err := fs.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		reportLeakedFD(fs, t)
+	}()
+	for _, tc := range []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{"oversized header", func(data []byte) {
+			binary.LittleEndian.PutUint64(data[:8], HeaderSize)
+		}},
+		{"bad header checksum", func(data []byte) {
+			header := pb.MustMarshal(&pb.SnapshotHeader{Version: uint64(V2), ChecksumType: pb.CRC32IEEE})
+			binary.LittleEndian.PutUint64(data[:8], uint64(len(header)))
+			copy(data[8:], header)
+			copy(data[8+len(header):], []byte{1, 2, 3, 4})
+		}},
+		{"unsupported version", func(data []byte) {
+			header := pb.MustMarshal(&pb.SnapshotHeader{Version: 99, ChecksumType: pb.CRC32IEEE})
+			binary.LittleEndian.PutUint64(data[:8], uint64(len(header)))
+			copy(data[8:], header)
+		}},
+		{"unsupported checksum", func(data []byte) {
+			header := pb.MustMarshal(&pb.SnapshotHeader{Version: uint64(V2), ChecksumType: 99})
+			binary.LittleEndian.PutUint64(data[:8], uint64(len(header)))
+			copy(data[8:], header)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, HeaderSize+tailSize+5)
+			tc.mutate(data)
+			f, err := fs.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Write(data); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := GetV2PayloadChecksum(path, fs); !errors.Is(err, ErrInvalidSnapshotImage) {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
 }
 
 func TestV1SnapshotCanBeLoaded(t *testing.T) {
